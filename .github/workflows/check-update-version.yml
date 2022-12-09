@@ -1,0 +1,38 @@
+name: "Check and Update Version"
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron:  '0 0 * * 0'
+
+env:
+  VERSION_URL: "https://download.sysdig.com/scanning/sysdig-cli-scanner/latest_version.txt"
+  VERSION_FILE: latest_version.txt
+  COMM_TAG: BUMP
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+      - name: GET latest version
+        id: version
+        run: |
+              export version_file=$(eval echo "${GITHUB_WORKSPACE}/${VERSION_FILE}")
+              rm -f $version_file
+              curl -L -s $VERSION_URL -o $version_file
+              echo "changes=$(git status --porcelain | wc -l)" >> $GITHUB_OUTPUT
+              echo "version=$(cat $version_file | tr -d '\n')" >> $GITHUB_OUTPUT
+      - name: Push new version to repo
+        uses: stefanzweifel/git-auto-commit-action@v4
+        id: commit
+        if: ${{ success() && steps.version.outputs.changes > 0 }}
+        with:
+          commit_message: "[${{ env.COMM_TAG }}] Update version to ${{ steps.version.outputs.version }}"

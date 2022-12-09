@@ -1,0 +1,109 @@
+name: Update image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: filippobuletto/sysdig-cli-scanner
+  VERSION_FILE: latest_version.txt
+  UPDATE_FILE: last_update.txt
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v3
+      - name: Check Commit Type
+        id: getcommit
+        run: |
+          # Dirty hack because github doesn't support aborting cleanly a workflow
+          sed "s/^\[BUMP\].*/good=1/; t; s/.*/good=0/" <(git log -1 --format="%s" | tr -d '\n') >> $GITHUB_OUTPUT
+      - name: "Read scanner latest version"
+        id: latest_version
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        run: |
+              export version_file=$(eval echo "${GITHUB_WORKSPACE}/${VERSION_FILE}")
+              echo "version=$(cat $version_file | tr -d '\n')" >> $GITHUB_OUTPUT
+      - name: Set up QEMU
+        id: qemu
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: docker/setup-qemu-action@v2
+      - name: Setup Docker buildx
+        id: buildx
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: docker/setup-buildx-action@v2
+      - name: Available platforms
+        id: platforms
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        run: echo ${{ steps.buildx.outputs.platforms }}
+      - name: Log into registry ${{ env.REGISTRY }}
+        id: login
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+      - name: Extract Docker metadata
+        id: meta
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=true
+          tags: |
+            type=raw,value=${{ steps.latest_version.outputs.version }}
+      - name: Build and Push
+        id: build-and-push
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: docker/bake-action@v2
+        with:
+          files: |
+            ./.github/workflows/docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file }}
+          targets: build
+          push: true
+      - name: Run Trivy vulnerability scanner
+        id: trivy
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GH_TOKEN }}
+      - name: Upload Trivy scan results to GitHub Security tab
+        id: serif
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+      - name: Set last update time
+        id: version
+        if: ${{ steps.getcommit.outputs.good > 0 }}
+        run: |
+              export update_file=$(eval echo "${GITHUB_WORKSPACE}/${UPDATE_FILE}")
+              rm -f $update_file
+              date > $update_file
+      - name: Push last update time to repo
+        uses: stefanzweifel/git-auto-commit-action@v4
+        id: pushcommit
+        if: ${{ success() && steps.getcommit.outputs.good > 0 }}
+        with:
+          commit_message: Last update
